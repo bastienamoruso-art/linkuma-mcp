@@ -1,18 +1,22 @@
 # Linkuma MCP
 
 > Safe, idempotent netlinking automation for the [Linkuma](https://app.linkuma.com/) API.
-> Built-in dry-run, anchor validation, budget cap, and a local-citation campaign builder.
+> Built-in dry-run, anchor strategies, budget cap, multi-account support, and campaign builders for both local citations and editorial backlinks.
 > [Model Context Protocol](https://modelcontextprotocol.io/) server — works with Claude Desktop, Claude Code, and any MCP-aware client.
+
+**v0.2.0** — multi-account, editorial campaigns, dashboard, refusal analyser, CSV export, suggest-tier intelligence. Full-Linkuma (zero external dependency on third-party SEO APIs).
 
 ---
 
 ## Why this MCP
 
-Wrapping a paid API in 200 lines of `httpx` is easy. Doing it without ever double-billing your card or shipping a campaign with the wrong anchor is the hard part. This server ships with three things you won't write yourself the first time:
+Wrapping a paid API in 200 lines of `httpx` is easy. Doing it without ever double-billing your card or shipping a campaign with the wrong anchor is the hard part. This server ships with five things you won't write yourself the first time:
 
 1. **Idempotence by default.** Every order is keyed by an `external_ref`. A cache at `~/.linkuma-mcp/idempotency.json` is checked _before_ every `POST /carts/order`, and an opportunistic server-side lookup runs after. A timeout or 5xx is never silently retried — you get a typed `LinkumaOrderUncertain` with a recovery path.
 2. **Dry-run, then confirm.** Pricing and campaign-planning tools issue a single-use `confirm_token` valid for 10 minutes. Nothing leaves your machine until you hand it back.
-3. **Business guardrails the docs don't mention.** Anchor over-optimisation across a batch and across 90-day history. `pagekw` vs anchor coherence. Hard budget cap from `LINKUMA_BUDGET_CAP_EUR`. Refusal of short Google Maps URLs (`maps.app.goo.gl`, `g.co/maps`) that produce broken local citations.
+3. **Anchor strategies built-in (anti over-optimisation).** The editorial campaign builder ships with `branded`, `exact`, `semantic`, and `mixed` strategies. `mixed` defaults to 30% branded / 20% exact / 50% semantic — the safest distribution against algorithmic penalties.
+4. **Multi-account ready (agencies).** Drop a JSON map in `LINKUMA_API_KEYS_JSON` and every tool accepts an `account=<alias>` parameter. Backwards-compatible with single-key setups: existing v0.1 users upgrade with zero config changes.
+5. **Business guardrails the docs don't mention.** Anchor over-optimisation across a batch and across 90-day history. `pagekw` vs anchor coherence. Hard budget cap from `LINKUMA_BUDGET_CAP_EUR`. Refusal of short Google Maps URLs (`maps.app.goo.gl`, `g.co/maps`) that produce broken local citations.
 
 ---
 
@@ -30,7 +34,10 @@ cd linkuma-mcp
 pip install -e ".[dev]"
 ```
 
-Then create a `.env` from `.env.example` and set at least `LINKUMA_API_KEY`.
+Then create a `.env` from `.env.example`. Set either:
+
+- `LINKUMA_API_KEY=lkm_xxx...` (single account), **or**
+- `LINKUMA_API_KEYS_JSON='{"perso":"lkm_aaa","client1":"lkm_bbb"}'` (multi-account)
 
 ### Claude Desktop
 
@@ -43,6 +50,22 @@ Add this to `~/Library/Application Support/Claude/claude_desktop_config.json` (m
       "command": "linkuma-mcp",
       "env": {
         "LINKUMA_API_KEY": "lkm_xxxxxxxxxxxxxxxxxxxxxxxxx",
+        "LINKUMA_BUDGET_CAP_EUR": "300"
+      }
+    }
+  }
+}
+```
+
+Multi-account example:
+
+```json
+{
+  "mcpServers": {
+    "linkuma": {
+      "command": "linkuma-mcp",
+      "env": {
+        "LINKUMA_API_KEYS_JSON": "{\"perso\":\"lkm_aaa...\",\"client1\":\"lkm_bbb...\"}",
         "LINKUMA_BUDGET_CAP_EUR": "300"
       }
     }
@@ -131,9 +154,61 @@ If the call times out, you get `LinkumaOrderUncertain` — do **not** retry. Ins
 #    re-run the same plan: items already shipped are deduped.
 ```
 
+### 4. Editorial campaign (v0.2.0)
+
+```text
+> Plan a 12-link editorial campaign for project p_abc on https://my-site.fr/services/courtier, keywords ["pret immobilier orleans", "courtier immobilier", "rachat de credit"], budget 250 EUR. Use the mixed anchor strategy.
+
+# Tool: linkuma_editorial_campaign_plan
+{
+  "project_id": "p_abc",
+  "target_url": "https://my-site.fr/services/courtier",
+  "count": 12,
+  "budget_cap_eur": 250,
+  "keywords": ["pret immobilier orleans", "courtier immobilier", "rachat de credit"],
+  "tier": "auto",
+  "anchor_strategy": "mixed"
+}
+# -> 12 items with 4 branded / 2 exact / 6 semantic anchors,
+#    publish dates spread over 30 days,
+#    a recommended thematic, a confirm_token.
+
+> Execute.
+
+# Tool: linkuma_editorial_campaign_execute
+```
+
+### 5. Cross-project dashboard (v0.2.0)
+
+```text
+> Show me the dashboard for the last 30 days.
+
+# Tool: linkuma_dashboard
+{ "scope": "all", "since": "30d_ago" }
+
+# -> credit_remaining, credit_consumed_period,
+#    by_project [name, orders_count, total_spent, by_status, refusal_rate],
+#    by_tier, by_status, alerts.
+```
+
+### 6. Analyse refusals (v0.2.0)
+
+```text
+> Why are my orders getting refused?
+
+# Tool: linkuma_orders_refused_analyze
+{ "since": "90d_ago" }
+
+# -> top reasons, top URLs, recommendations:
+#    "Diversify anchors", "Validate target URLs",
+#    "Abandon `<url>` as a target", etc.
+```
+
 ---
 
 ## Tools reference
+
+### v0.1.0 — core (unchanged)
 
 | Tool | What it does | Safety notes |
 |---|---|---|
@@ -148,6 +223,21 @@ If the call times out, you get `LinkumaOrderUncertain` — do **not** retry. Ins
 | `linkuma_local_campaign_plan` | Dry-run plan for N citations with thematic proposal | Read-only |
 | `linkuma_local_campaign_execute` | Place the plan — per-item idempotency on `{plan_id}-{idx}` | Stops on first credit shortage |
 
+### v0.2.0 — full-Linkuma extension (zero external dep)
+
+| Tool | What it does | Safety notes |
+|---|---|---|
+| `linkuma_editorial_campaign_plan` | Dry-run plan for N editorial links with anchor strategy | Read-only — issues `confirm_token` |
+| `linkuma_editorial_campaign_execute` | Commit the plan — per-item idempotency on `{plan_id}-{idx}` | Stops on first credit shortage |
+| `linkuma_suggest_tier` | Recommend a tier from context + budget + competition | Read-only, heuristic-only (no API call) |
+| `linkuma_export_orders` | Export orders to CSV (inline or to disk) | Read-only |
+| `linkuma_dashboard` | Cross-project KPIs, alerts (refusal rate, stale pending, low credit) | Read-only |
+| `linkuma_orders_refused_analyze` | Pattern detection on refused orders + recommendations | Read-only |
+| `linkuma_bulk_reorder_plan` | Plan a re-order of refused orders with adjustments | Read-only — issues `confirm_token` |
+| `linkuma_bulk_reorder_execute` | Commit the bulk plan | Per-item idempotency |
+
+Every v0.2.0 tool accepts an optional `account=<alias>` parameter when `LINKUMA_API_KEYS_JSON` is configured.
+
 ### Resources (read-only views)
 
 - `linkuma://settings/credit` — JSON snapshot of your settings (credit balance).
@@ -160,7 +250,8 @@ If the call times out, you get `LinkumaOrderUncertain` — do **not** retry. Ins
 
 | Var | Default | Purpose |
 |---|---|---|
-| `LINKUMA_API_KEY` | — _(required)_ | Bearer token for the API. |
+| `LINKUMA_API_KEY` | — _(required, unless multi-account)_ | Bearer token for the API. |
+| `LINKUMA_API_KEYS_JSON` | — _(optional)_ | JSON map `{alias: api_key}`. Enables multi-account; takes precedence over `LINKUMA_API_KEY`. |
 | `LINKUMA_BASE_URL` | `https://app.linkuma.com/api/v1` | Override for staging or tests. |
 | `LINKUMA_BUDGET_CAP_EUR` | `500` | Hard cap before any order POST. Blocks the order if exceeded. |
 | `LINKUMA_RATE_LIMIT_RPS` | `2` | Client-side rate limit (token bucket). |
@@ -174,24 +265,43 @@ If the call times out, you get `LinkumaOrderUncertain` — do **not** retry. Ins
 
 The flow is always **plan → confirm → execute**:
 
-1. `cart_price` / `local_campaign_plan` return a single-use `confirm_token` (in-memory, 10-min TTL).
-2. `cart_order` / `local_campaign_execute` consume that token. No token, no write.
+1. `cart_price` / `*_campaign_plan` / `bulk_reorder_plan` return a single-use `confirm_token` (in-memory, 10-min TTL).
+2. `cart_order` / `*_campaign_execute` / `bulk_reorder_execute` consume that token. No token, no write.
 3. Every order POST is keyed by `external_ref` and checked against `~/.linkuma-mcp/idempotency.json` _before_ leaving your machine. Replays are no-ops.
 4. The HTTP client _never_ retries `POST /carts/order` on a 5xx, timeout, or network error. It raises `LinkumaOrderUncertain`. The recovery path is documented in every error message: `linkuma_orders_list(external_ref=...)`.
 
 The local store is JSON, file-locked (`fcntl.flock` on POSIX), and survives crashes. It is the authoritative source-of-truth for "did I already ship this `external_ref`?".
 
+### Anchor strategies
+
+The editorial builder ships four strategies:
+
+| Strategy | Distribution | Use case |
+|---|---|---|
+| `branded` | 100% brand variants (domain, brand.tld, host) | Brand-building, low-risk diversity |
+| `exact` | 100% verbatim keyword | Targeted ranking pushes — risky beyond ~10% of the profile |
+| `semantic` | 100% LSI variants ("en savoir plus sur X", "X officiel", "brand X") | Filler / topical authority |
+| `mixed` _(default)_ | 30% branded / 20% exact / 50% semantic | The safest blanket default — passes algorithmic scrutiny |
+
+Generation is deterministic given the same keywords + target URL, so replaying a plan produces identical anchors. Distribution is computed with largest-remainder rounding to guarantee exact integer counts that sum to `count`.
+
+### Multi-account pattern
+
+`LINKUMA_API_KEYS_JSON` parses into a `{alias: key}` map at startup. The resolver picks the first alias when `account` is omitted, or matches an explicit alias. `LinkumaClient` instances are cached per alias for the lifetime of the process. v0.1 users with `LINKUMA_API_KEY` keep a single `default` alias and never see the difference.
+
 ---
 
-## Roadmap v2
+## Roadmap v3
 
-- Multi-account support via `LINKUMA_API_KEYS_JSON` and an `account` param on every tool.
-- `linkuma_editorial_campaign_plan` / `_execute` — symmetric to the local one.
-- `linkuma_suggest_tier(target_url, anchor, budget, context)` — pricing intelligence.
-- `linkuma_export_orders` — CSV + Google Sheets sync.
-- `linkuma_post_mortem` — GSC × Linkuma lift attribution (requires GSC OAuth or Cuik MCP).
-- `linkuma_benchmark_competitors` — reference profiles via Babbar / DataForSEO.
-- Optional Notion sync for tracked orders.
+These features require external dependencies (not v0.2.0 candidates):
+
+- `linkuma_post_mortem` — GSC × Linkuma lift attribution (requires Google Search Console OAuth or Cuik MCP).
+- `linkuma_benchmark_competitors` — reference profiles via Babbar or DataForSEO (paid APIs).
+- Notion sync — push orders to a configurable Notion DB.
+- Google Sheets export — `linkuma_export_orders(format="sheet_url")` via gws CLI or the Sheets API.
+- Webhook receiver — if Linkuma exposes push notifications.
+
+If you need any of these now, open an issue and describe your use case.
 
 ---
 

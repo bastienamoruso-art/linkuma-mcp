@@ -142,7 +142,7 @@ class LinkumaClient:
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Accept": "application/json",
-                "User-Agent": "linkuma-mcp/0.1.0 (+https://github.com/bastienamoruso-art/linkuma-mcp)",
+                "User-Agent": "linkuma-mcp/0.2.0 (+https://github.com/bastienamoruso-art/linkuma-mcp)",
             },
             transport=transport,
         )

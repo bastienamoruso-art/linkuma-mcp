@@ -14,9 +14,23 @@ import os
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 
+from . import accounts
 from .client import LinkumaClient
 from .thematics import fetch_thematics
-from .tools import cart, doctor, local_campaign, orders, projects, thematics
+from .tools import (
+    bulk,
+    cart,
+    dashboard,
+    doctor,
+    editorial_campaign,
+    export,
+    local_campaign,
+    orders,
+    projects,
+    refused,
+    suggest_tier,
+    thematics,
+)
 
 load_dotenv()
 
@@ -27,14 +41,15 @@ logging.basicConfig(
 
 mcp = FastMCP("linkuma-mcp")
 
-_client_singleton: LinkumaClient | None = None
-
 
 def get_client() -> LinkumaClient:
-    global _client_singleton
-    if _client_singleton is None:
-        _client_singleton = LinkumaClient()
-    return _client_singleton
+    """Return the default-account client.
+
+    v0.2.0: routes through the multi-account resolver. If
+    `LINKUMA_API_KEYS_JSON` is unset, falls back to `LINKUMA_API_KEY` under
+    the alias `default` — fully backwards-compatible with v0.1.0.
+    """
+    return accounts.get_client()
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +62,13 @@ thematics.register(mcp, get_client)
 cart.register(mcp, get_client)
 orders.register(mcp, get_client)
 local_campaign.register(mcp, get_client)
+# v0.2.0 — full-Linkuma tools (zero external dependency)
+editorial_campaign.register(mcp, get_client)
+suggest_tier.register(mcp, get_client)
+export.register(mcp, get_client)
+dashboard.register(mcp, get_client)
+refused.register(mcp, get_client)
+bulk.register(mcp, get_client)
 
 
 # ---------------------------------------------------------------------------
