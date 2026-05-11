@@ -274,16 +274,39 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
 # ---------------------------------------------------------------------------
 
 # Fields kept locally for plan/coherence work but stripped before POST.
+# Note: ``pagekw`` is required by Linkuma for editorial tiers
+# (basic/standard/premium) but rejected for citation_*. Campaign tools handle
+# that conditionally; here we just keep it local until explicit injection.
 _LOCAL_ONLY_FIELDS = {"pagekw", "nice_name", "external_ref"}
+
+# Linkuma's /carts/price + /carts/order require these fields on every item
+# even when their value is the obvious default. We inject them here so callers
+# don't have to remember.
+_LINKUMA_ITEM_DEFAULTS: dict = {
+    "distribution": "direct",
+    "fast_publication": False,
+    "qty": 1,
+}
 
 
 def strip_local_fields(item: dict) -> dict:
-    """Return a copy of `item` without MCP-local helper fields and None values."""
-    return {
+    """Return a copy of `item` without MCP-local helper fields and None values.
+
+    Also injects Linkuma-required defaults when missing.
+    """
+    cleaned = {
         k: v
         for k, v in item.items()
         if k not in _LOCAL_ONLY_FIELDS and v is not None
     }
+    # For editorial tiers, pagekw is required by Linkuma; re-inject from input
+    # since it was stripped above (it's "local-only" for citation tiers).
+    item_type = cleaned.get("type", "")
+    if item_type in {"basic", "standard", "premium"} and item.get("pagekw"):
+        cleaned["pagekw"] = item["pagekw"]
+    for key, default in _LINKUMA_ITEM_DEFAULTS.items():
+        cleaned.setdefault(key, default)
+    return cleaned
 
 
 def build_price_body(items: list[dict]) -> dict:

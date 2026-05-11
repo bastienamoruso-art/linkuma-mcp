@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "linkuma-mcp"
-version = "0.3.0"
+version = "0.3.1"
 description = "MCP server for Linkuma API — multi-account, dry-run, idempotent. Editorial + local campaigns, anchor strategies, dashboard, refusal analyser."
 readme = "README.md"
 requires-python = ">=3.11"
