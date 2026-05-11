@@ -2,6 +2,12 @@
 
 All models allow extra fields (`extra="allow"`) so a schema change on Linkuma's
 side does not break the MCP. Unknown fields are logged as warnings by the client.
+
+v0.3.0 — cart item schema aligned with the live `/carts/price` and `/carts/order`
+endpoints (reverse-engineered from production orders). See:
+- `type` (not `tier`), `url` (not `target_url`), `map`, `project_id`, `thematic_id`,
+  `category_id`, `qty`, `anchor`, `anchor_value`, `distribution`, `started_at`,
+  `fast_publication`, `brief`, etc.
 """
 
 from __future__ import annotations
@@ -11,7 +17,17 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-Tier = Literal["basic", "standard", "premium"]
+# Catalogue tiers exposed by the Linkuma `/carts/{price,order}` `type` field.
+ItemType = Literal[
+    "basic",
+    "standard",
+    "premium",
+    "citation_linkuma",
+    "citation_boost",
+]
+# Legacy alias used by suggest_tier and historical normalisation paths.
+Tier = ItemType
+
 OrderStatus = Literal[
     "pending_validation",
     "in_writing",
@@ -19,6 +35,9 @@ OrderStatus = Literal[
     "published",
     "refused",
 ]
+
+Anchor = Literal["url", "generic", "custom"]
+Distribution = Literal["direct", "schedule"]
 
 
 class _LinkumaBase(BaseModel):
@@ -40,30 +59,59 @@ class Thematic(_LinkumaBase):
 
 
 class CartItem(_LinkumaBase):
-    """Single line in a price/order request.
+    """Single line in a `/carts/price` or `/carts/order` request.
 
-    Fields aligned with /carts/price and /carts/order. `pagekw` is local-only
-    metadata used by anchor/pagekw coherence checks; it is stripped before
-    POST if not part of the upstream schema.
+    Aligned with the body shape that Linkuma actually accepts in production
+    (reverse-engineered from successful orders, 2026-05-11). Local-only
+    helper fields (`pagekw`, `nice_name`, `external_ref`) are stripped before
+    POST by the cart helpers.
     """
 
-    tier: Tier
+    # ------------------------------------------------------------------ core
+    type: ItemType
+    url: str
+    project_id: str
     thematic_id: str
-    target_url: str
-    anchor: str
-    pagekw: str | None = None
-    publish_date: str | None = None  # ISO date (YYYY-MM-DD)
-    # Optional local citation fields (only used by local_campaign tools).
-    gmaps_url: str | None = None
+    qty: int = 1
+
+    # --------------------------------------------------------------- citation
+    # `map` is the canonical desktop GMaps URL. Required for citation_* items.
+    map: str | None = None
+    # `category_id` complements `thematic_id` for citation_* items (e.g. Travaux
+    # under Maison thematic).
+    category_id: str | None = None
+
+    # ----------------------------------------------------------------- anchor
+    anchor: Anchor = "custom"
+    anchor_value: str | None = None  # required when anchor == "custom"
+
+    # --------------------------------------------------------- scheduling/dist
+    distribution: Distribution = "direct"
+    distribution_value: int | None = None  # only used when distribution=="schedule"
+    started_at: str | None = None  # ISO date YYYY-MM-DD
+    fast_publication: bool = False
+
+    # ---------------------------------------------------------- editorial only
     brief: str | None = None
+    pagekw: str | None = None  # local-only metadata for coherence checks
+    improved_text: bool = False
+    url2: str | None = None
+    anchor2_type: str | None = None
+    custom_anchor2: str | None = None
+    is_no_link: bool = False
+    additional_words_count: int | None = None  # 100 / 200 / 300 / 400 / 500
+
+    # --------------------------------------------------------------- local-only
+    # Helper metadata, NEVER sent upstream. Stripped before POST.
     nice_name: str | None = None
+    external_ref: str | None = None
 
 
 class PricedItem(_LinkumaBase):
-    tier: Tier
-    target_url: str
-    anchor: str
-    price_eur: float
+    type: ItemType | None = None
+    url: str | None = None
+    anchor: str | None = None
+    price_eur: float | None = None
     thematic_id: str | None = None
 
 
@@ -103,15 +151,24 @@ class Settings(_LinkumaBase):
 
 
 class LocalCampaignItem(_LinkumaBase):
-    tier: Tier
+    """Citation campaign line. Aligned with v0.3.0 CartItem schema."""
+
+    type: ItemType  # citation_boost or citation_linkuma
+    url: str
+    map: str
+    project_id: str
     thematic_id: str
-    target_url: str
-    gmaps_url: str
-    anchor: str
-    publish_date: str
-    nice_name: str
-    external_ref: str
+    category_id: str | None = None
+    qty: int = 1
+    anchor: Anchor = "custom"
+    anchor_value: str | None = None
+    distribution: Distribution = "direct"
+    started_at: str | None = None
+    fast_publication: bool = False
     brief: str | None = None
+    # Local helpers
+    nice_name: str | None = None
+    external_ref: str | None = None
 
 
 class LocalCampaignPlan(_LinkumaBase):

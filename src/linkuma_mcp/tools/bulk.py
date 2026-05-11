@@ -4,11 +4,15 @@ Builds a fresh plan from a list of refused order_ids, applying optional
 adjustments (most usefully `anchor: "auto_rewrite"` which regenerates anchors
 via the `mixed` strategy). Same plan -> confirm -> execute pattern as the rest
 of the v0.2.0 toolkit.
+
+v0.3.0 — items follow the real cart schema (`type`, `url`, `anchor_value`,
+`distribution`, `started_at`).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from .. import idempotency
@@ -26,8 +30,25 @@ from ..pricing import (
     enforce_budget,
     issue_confirm_token,
 )
+from .cart import build_order_body
 
-_TIER_PRICE_FLOOR = {"basic": 7.0, "standard": 10.0, "premium": 30.0}
+_TYPE_PRICE_FLOOR = {
+    "basic": 7.0,
+    "standard": 10.0,
+    "premium": 30.0,
+    "citation_linkuma": 10.0,
+    "citation_boost": 35.0,
+}
+_VALID_TYPES = set(_TYPE_PRICE_FLOOR)
+
+# Legacy "Citation Boost" / "Citation Linkuma" string mapper from `get_order` API.
+_TYPE_FROM_LABEL = {
+    "citation boost": "citation_boost",
+    "citation linkuma": "citation_linkuma",
+    "basic": "basic",
+    "standard": "standard",
+    "premium": "premium",
+}
 
 
 def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
@@ -41,9 +62,11 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
 
         Adjustments currently supported:
         - `{"anchor": "auto_rewrite"}` -> regenerate anchors via `mixed`
-        - `{"tier": "<basic|standard|premium>"}` -> downgrade/upgrade tier
-        - `{"target_url": "<new>"}` -> override the target URL across the batch
+        - `{"type": "<basic|standard|premium|citation_*>"}` -> change item type
+        - `{"url": "<new>"}` -> override the target URL across the batch
         - `{"thematic_id": "<new>"}` -> override thematic across the batch
+
+        Backwards-compat aliases: `tier` -> `type`, `target_url` -> `url`.
 
         Returns a plan with `confirm_token` to feed to
         `linkuma_bulk_reorder_execute`.
@@ -51,7 +74,7 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
         if not refused_order_ids:
             raise LinkumaValidationError("refused_order_ids must not be empty")
 
-        adjustments = adjustments or {}
+        adjustments = _normalise_adjustments(adjustments or {})
         _validate_adjustments(adjustments)
 
         client = get_account_client(account) if account is not None else get_client()
@@ -75,21 +98,20 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
                 f"none of the provided order_ids could be fetched: {refused_order_ids}"
             )
 
-        # Generate new anchors if requested.
-        new_anchors: list[str] = []
+        # Generate new anchor values if requested.
+        new_anchor_values: list[str] = []
         if adjustments.get("anchor") == "auto_rewrite":
-            # Collect keywords from sources (pagekw + existing anchor as seed).
             keywords: list[str] = []
             for s in sources:
                 if s.get("pagekw"):
                     keywords.append(str(s["pagekw"]))
-                elif s.get("anchor"):
-                    keywords.append(str(s["anchor"]))
-            target_url = adjustments.get("target_url") or (sources[0].get("target_url") or "")
-            new_anchors = generate_anchors(
+                elif _source_anchor(s):
+                    keywords.append(str(_source_anchor(s)))
+            target_url = adjustments.get("url") or _source_url(sources[0]) or ""
+            new_anchor_values = generate_anchors(
                 count=len(sources),
                 strategy="mixed",
-                keywords=keywords or [(sources[0].get("anchor") or "")],
+                keywords=keywords or [_source_anchor(sources[0]) or ""],
                 target_url=target_url,
             )["anchors"]
 
@@ -101,33 +123,47 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
                 f"could not fetch {len(not_found)} order(s): {not_found}"
             )
 
+        today_iso = datetime.now(UTC).date().isoformat()
+
         for idx, src in enumerate(sources):
-            tier = adjustments.get("tier") or src.get("tier") or "standard"
-            target_url = adjustments.get("target_url") or src.get("target_url") or ""
-            thematic_id = adjustments.get("thematic_id") or src.get("thematic_id") or ""
-            anchor = (
-                new_anchors[idx]
-                if (adjustments.get("anchor") == "auto_rewrite" and idx < len(new_anchors))
-                else src.get("anchor")
+            item_type = adjustments.get("type") or _source_type(src) or "standard"
+            url = adjustments.get("url") or _source_url(src) or ""
+            thematic_id = (
+                adjustments.get("thematic_id") or src.get("thematic_id") or ""
             )
-            pagekw = src.get("pagekw")
+            anchor_value = (
+                new_anchor_values[idx]
+                if (
+                    adjustments.get("anchor") == "auto_rewrite"
+                    and idx < len(new_anchor_values)
+                )
+                else _source_anchor(src)
+            )
             items.append(
                 {
-                    "tier": tier,
+                    "type": item_type,
+                    "url": url,
+                    "project_id": src.get("project_id"),
                     "thematic_id": thematic_id,
-                    "target_url": target_url,
-                    "anchor": anchor,
-                    "pagekw": pagekw,
+                    "qty": 1,
+                    "anchor": "custom",
+                    "anchor_value": anchor_value,
+                    "distribution": "direct",
+                    "started_at": today_iso,
+                    "fast_publication": False,
+                    "pagekw": src.get("pagekw"),
+                    # local-only metadata
                     "external_ref": f"{plan_id}-{idx:02d}",
                     "source_order_id": src.get("order_id") or src.get("id"),
-                    "project_id": src.get("project_id"),
                 }
             )
 
         # Local price estimate (we don't hit /carts/price to keep this fast
         # and idempotent across projects). Authoritative price returns from
         # /carts/order at execute time.
-        total_eur = sum(_TIER_PRICE_FLOOR.get(it["tier"], 10.0) for it in items)
+        total_eur = sum(
+            _TYPE_PRICE_FLOOR.get(it.get("type", ""), 10.0) for it in items
+        )
 
         try:
             enforce_budget(total_eur)
@@ -198,12 +234,11 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
                 )
                 continue
 
-            body = {
-                "project_id": item.get("project_id"),
-                "items": [_strip_local_fields(item)],
-                "external_ref": ext_ref,
-                "payment_method": "direct_credits",
-            }
+            body = build_order_body(
+                [item],
+                external_ref=ext_ref,
+                nice_name=f"bulk-{ext_ref}",
+            )
             try:
                 resp = await client.cart_order(body)
             except LinkumaOrderUncertain as exc:
@@ -234,7 +269,7 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
                 )
                 continue
 
-            order_id = resp.get("order_id") or resp.get("id") or ""
+            order_id = _extract_order_id(resp)
             idempotency.remember(
                 ext_ref,
                 {
@@ -249,8 +284,8 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
                 {
                     "external_ref": ext_ref,
                     "order_id": order_id,
-                    "tier": item["tier"],
-                    "anchor": item["anchor"],
+                    "type": item["type"],
+                    "anchor_value": item.get("anchor_value"),
                 }
             )
 
@@ -262,12 +297,44 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Source order helpers (normalise legacy /orders/{id} shape -> v0.3 cart fields)
 # ---------------------------------------------------------------------------
 
 
-_LOCAL_ONLY_FIELDS = {"external_ref", "source_order_id", "project_id", "pagekw"}
-_VALID_ADJUSTMENT_KEYS = {"anchor", "tier", "target_url", "thematic_id"}
+def _source_type(order: dict) -> str | None:
+    raw = order.get("type") or order.get("tier")
+    if not raw:
+        return None
+    key = str(raw).strip().lower()
+    return _TYPE_FROM_LABEL.get(key, key if key in _VALID_TYPES else None)
+
+
+def _source_url(order: dict) -> str | None:
+    return order.get("url") or order.get("target_url")
+
+
+def _source_anchor(order: dict) -> str | None:
+    # /orders returns either `anchor` (single str) or `anchor_values` (csv).
+    av = order.get("anchor_value") or order.get("anchor_values") or order.get("anchor")
+    return av
+
+
+# ---------------------------------------------------------------------------
+# Adjustments
+# ---------------------------------------------------------------------------
+
+
+_VALID_ADJUSTMENT_KEYS = {"anchor", "type", "url", "thematic_id"}
+
+
+def _normalise_adjustments(adjustments: dict) -> dict:
+    """Accept legacy keys (`tier`, `target_url`) for backwards compat."""
+    out = dict(adjustments)
+    if "tier" in out and "type" not in out:
+        out["type"] = out.pop("tier")
+    if "target_url" in out and "url" not in out:
+        out["url"] = out.pop("target_url")
+    return out
 
 
 def _validate_adjustments(adjustments: dict) -> None:
@@ -282,16 +349,21 @@ def _validate_adjustments(adjustments: dict) -> None:
         raise LinkumaValidationError(
             f"`anchor` adjustment must be `auto_rewrite` or omitted; got `{anchor}`"
         )
-    tier = adjustments.get("tier")
-    if tier is not None and tier not in {"basic", "standard", "premium"}:
+    item_type = adjustments.get("type")
+    if item_type is not None and item_type not in _VALID_TYPES:
         raise LinkumaValidationError(
-            f"`tier` adjustment must be basic/standard/premium; got `{tier}`"
+            f"`type` adjustment must be one of {sorted(_VALID_TYPES)}; "
+            f"got `{item_type}`"
         )
 
 
-def _strip_local_fields(item: dict) -> dict:
-    return {
-        k: v
-        for k, v in item.items()
-        if k not in _LOCAL_ONLY_FIELDS and v is not None
-    }
+def _extract_order_id(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    orders = data.get("orders")
+    if isinstance(orders, list) and orders and isinstance(orders[0], dict):
+        oid = orders[0].get("id") or orders[0].get("order_id")
+        if oid:
+            return str(oid)
+    return str(data.get("order_id") or data.get("id") or "")

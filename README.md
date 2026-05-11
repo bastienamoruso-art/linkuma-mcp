@@ -4,6 +4,13 @@
 > Built-in dry-run, anchor strategies, budget cap, multi-account support, and campaign builders for both local citations and editorial backlinks.
 > [Model Context Protocol](https://modelcontextprotocol.io/) server — works with Claude Desktop, Claude Code, and any MCP-aware client.
 
+**v0.3.0** — `linkuma_cart_price` / `linkuma_cart_order` / `*_campaign_*` now place real orders. Reverse-engineered from 10 successful production orders.
+- Cart item schema aligned with what Linkuma actually accepts: `type` (not `tier`), `url` (not `target_url`), `map` for citations, `anchor` + `anchor_value`, `distribution`, `started_at`, `fast_publication`, `brief`, `pagekw`, `category_id`, etc.
+- `cart_price` body now contains only `{"items": [...]}` — `payment_method` / `external_ref` / `nice_name` are valid only on `/carts/order` (where they're now sent correctly).
+- `linkuma_cart_price` LIVE-validated: returns `total_price: 35 EUR` for a `citation_boost` item.
+- `linkuma_local_campaign_plan` and `linkuma_editorial_campaign_plan` default `started_at` to J+5 working days (Linkuma requires J+4 minimum).
+- BREAKING: tool parameters renamed — `target_url` → `url`, `tier` → `type` on cart items. Public params on `linkuma_cart_price` lost `project_id` (it now lives at the item level, per upstream). Items returned by plan tools carry `type` / `anchor_value` instead of `tier` / `anchor`. See `KNOWN_ISSUES.md` for the full schema.
+
 **v0.2.1** — bug-fix release. API-mismatch audit + fixes against the live Linkuma API:
 - `/settings` is a list-of-one (`[{"user_id":..,"credit":..}]`), not a dict → fixed in `linkuma_doctor`, `linkuma_dashboard`, `linkuma_cart_price`, and the campaign builders.
 - No flat `GET /orders` endpoint exists upstream → `LinkumaClient.list_orders` now walks `/carts` and flattens orders, propagating `cart_id`/`external_ref` onto each order.
@@ -117,12 +124,16 @@ claude mcp add linkuma --scope project -e LINKUMA_API_KEY=lkm_... -- linkuma-mcp
 
 # Tool call: linkuma_cart_price
 {
-  "project_id": "p_abc",
   "items": [{
-    "tier": "premium",
+    "type": "premium",
+    "url": "https://my-site.fr/services/courtier",
+    "project_id": "p_abc",
     "thematic_id": "5d13d4ff-4204-4035-b8b4-f96280f2babe",
-    "target_url": "https://my-site.fr/services/courtier",
-    "anchor": "courtier orleans",
+    "qty": 1,
+    "anchor": "custom",
+    "anchor_value": "courtier orleans",
+    "distribution": "direct",
+    "started_at": "2026-05-25",
     "pagekw": "courtier immobilier orleans"
   }]
 }
@@ -132,7 +143,29 @@ claude mcp add linkuma --scope project -e LINKUMA_API_KEY=lkm_... -- linkuma-mcp
 > Place the order, idempotency ref "courtier-orleans-2026-05-11".
 
 # Tool call: linkuma_cart_order
-{ "confirm_token": "lkm_cnf_...", "external_ref": "courtier-orleans-2026-05-11" }
+{ "confirm_token": "lkm_cnf_...", "external_ref": "courtier-orleans-2026-05-11", "nice_name": "Courtier Orléans #01" }
+```
+
+For a **citation** (local SEO), use `type: "citation_boost"` or `"citation_linkuma"` and provide a `map` URL:
+
+```jsonc
+{
+  "items": [{
+    "type": "citation_boost",
+    "url": "https://www.maisons-elytis-lyonouest.fr/",
+    "map": "https://www.google.com/maps/place/Maisons+Elytis+Lyon+Ouest/@45.89,4.82,17z/data=...",
+    "project_id": "a1c0eb9b-d9c2-469d-a869-ccdfd6633931",
+    "thematic_id": "c82cc4de-4932-4b46-ada2-903f310f6185",
+    "category_id": "12eca9bd-84ce-4088-ac1e-8cbb9fd0249f",
+    "qty": 1,
+    "anchor": "custom",
+    "anchor_value": "constructeur maison lyon, Maisons Elytis",
+    "distribution": "direct",
+    "started_at": "2026-05-25",
+    "fast_publication": false,
+    "brief": "Citation locale pour constructeur de maisons individuelles à Lyon."
+  }]
+}
 ```
 
 If the call times out, you get `LinkumaOrderUncertain` — do **not** retry. Instead:

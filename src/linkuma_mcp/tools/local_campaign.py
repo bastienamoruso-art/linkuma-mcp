@@ -2,6 +2,11 @@
 
 Local citation workflow with dry-run, tier_mix, gmaps URL validation,
 and per-item idempotency (`{plan_id}-{idx}`).
+
+v0.3.0 — items are emitted in the real Linkuma cart schema:
+    type ∈ {citation_boost, citation_linkuma}
+    url, map, project_id, thematic_id, category_id, qty, anchor, anchor_value,
+    distribution, started_at, fast_publication, brief.
 """
 
 from __future__ import annotations
@@ -13,7 +18,6 @@ from typing import Any
 
 from .. import idempotency
 from ..checks import (
-    detect_anchor_over_optimisation,
     is_valid_gmaps_url,
     is_valid_http_url,
 )
@@ -32,10 +36,21 @@ from ..pricing import (
     resolve_tier_mix,
 )
 from ..thematics import fetch_thematics
+from .cart import (
+    _detect_overopt,
+    build_order_body,
+    build_price_body,
+)
 
 logger = logging.getLogger("linkuma_mcp")
 
 _VALID_TIER_MIX = {"auto", "boost", "linkuma"}
+
+# Map our internal "premium"/"standard" tier knobs onto Linkuma citation `type`.
+_TIER_TO_TYPE = {
+    "premium": "citation_boost",
+    "standard": "citation_linkuma",
+}
 
 
 def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
@@ -50,6 +65,7 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
         anchors: list[str] | None = None,
         tier_mix: str = "auto",
         thematic_hint: str | None = None,
+        category_id: str | None = None,
         language: str = "fr",
         spread_days: int = 30,
     ) -> dict:
@@ -90,23 +106,45 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
             client, tiers_sequence, thematic_hint, language
         )
 
+        # If caller didn't pass category_id but the proposed thematic exposes
+        # children via parent_id, use the proposed leaf as category and its
+        # parent as thematic. The thematic shape returned by fetch_thematics
+        # is already flattened (leaf nodes), so the "thematic_id" we receive
+        # is actually the leaf id. Linkuma accepts that as `category_id` and
+        # the parent as `thematic_id` for citation items.
+        resolved_thematic_id = (
+            thematic_proposed.get("parent_id") or thematic_proposed["id"]
+        )
+        resolved_category_id = category_id or (
+            thematic_proposed["id"] if thematic_proposed.get("parent_id") else None
+        )
+
         # ---- build items
         plan_id = idempotency.generate_external_ref(project_slug="lcl")
-        start = datetime.now(UTC).date()
+        # Linkuma requires `started_at` to be at least J+4 working days. Use
+        # J+5 calendar days as a safe buffer (covers a single weekend).
+        start = _add_working_days(datetime.now(UTC).date(), 5)
         step = max(1, spread_days // max(count, 1))
 
         items: list[dict] = []
         for idx, tier in enumerate(tiers_sequence):
-            publish_date = (start + timedelta(days=idx * step)).isoformat()
-            anchor = anchors[idx % len(anchors)]
+            started_at = (start + timedelta(days=idx * step)).isoformat()
+            anchor_value = anchors[idx % len(anchors)]
             items.append(
                 {
-                    "tier": tier,
-                    "thematic_id": thematic_proposed["id"],
-                    "target_url": target_url,
-                    "anchor": anchor,
-                    "publish_date": publish_date,
-                    "gmaps_url": gmaps_url,
+                    "type": _TIER_TO_TYPE[tier],
+                    "url": target_url,
+                    "map": gmaps_url,
+                    "project_id": project_id,
+                    "thematic_id": resolved_thematic_id,
+                    "category_id": resolved_category_id,
+                    "qty": 1,
+                    "anchor": "custom",
+                    "anchor_value": anchor_value,
+                    "distribution": "direct",
+                    "started_at": started_at,
+                    "fast_publication": False,
+                    # local-only helpers (stripped at POST):
                     "nice_name": f"{business_name} #{idx + 1:02d}",
                     "external_ref": f"{plan_id}-{idx:02d}",
                 }
@@ -114,15 +152,11 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
 
         # ---- local warnings
         warnings: list[str] = list(thematic_warnings)
-        warnings.extend(detect_anchor_over_optimisation(items))
+        warnings.extend(_detect_overopt(items))
 
         # ---- price the bundle
-        price_body = {
-            "project_id": project_id,
-            "items": [_strip_local_fields(i) for i in items],
-        }
         try:
-            price_resp = await client.cart_price(price_body)
+            price_resp = await client.cart_price(build_price_body(items))
             total_eur = _extract_total(price_resp)
         except Exception as exc:
             logger.warning("cart_price failed during plan: %s", exc)
@@ -176,7 +210,6 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
         """
         payload = consume_confirm_token(confirm_token)
         plan_id: str = payload["plan_id"]
-        project_id: str = payload["project_id"]
         items: list[dict] = payload["items"]
         total_eur: float = float(payload["total_eur"])
 
@@ -213,7 +246,7 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
                 settings = await client.get_settings()
                 current_credit = _extract_credit(settings)
                 credit_after = current_credit
-                est_item_price = _tier_floor(item["tier"])
+                est_item_price = _type_floor(item.get("type", ""))
                 if current_credit < est_item_price:
                     orders_failed.append(
                         {
@@ -226,13 +259,11 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
             except Exception:  # pragma: no cover
                 pass
 
-            body = {
-                "project_id": project_id,
-                "items": [_strip_local_fields(item)],
-                "external_ref": ext_ref,
-                "nice_name": item.get("nice_name"),
-                "payment_method": "direct_credits",
-            }
+            body = build_order_body(
+                [item],
+                external_ref=ext_ref,
+                nice_name=item.get("nice_name") or f"local-{ext_ref}",
+            )
             try:
                 resp = await client.cart_order(body)
             except LinkumaOrderUncertain as exc:
@@ -265,7 +296,7 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
                 )
                 continue
 
-            order_id = resp.get("order_id") or resp.get("id") or ""
+            order_id = _extract_order_id(resp)
             idempotency.remember(
                 ext_ref,
                 {
@@ -279,9 +310,9 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
                 {
                     "external_ref": ext_ref,
                     "order_id": order_id,
-                    "tier": item["tier"],
-                    "anchor": item["anchor"],
-                    "publish_date": item["publish_date"],
+                    "type": item["type"],
+                    "anchor_value": item.get("anchor_value"),
+                    "started_at": item.get("started_at"),
                 }
             )
             credit_after = _extract_credit(resp) or credit_after
@@ -380,31 +411,54 @@ async def _propose_thematic(
     return chosen, alternatives, warnings
 
 
-_LOCAL_ONLY_FIELDS = {"nice_name", "external_ref"}
+def _add_working_days(start_date, working_days: int):
+    """Add `working_days` business days (Mon-Fri) to `start_date`."""
+    from datetime import timedelta as _td
+
+    d = start_date
+    added = 0
+    while added < working_days:
+        d = d + _td(days=1)
+        if d.weekday() < 5:  # Mon=0..Fri=4
+            added += 1
+    return d
 
 
-def _strip_local_fields(item: dict) -> dict:
-    return {k: v for k, v in item.items() if k not in _LOCAL_ONLY_FIELDS and v is not None}
-
-
-def _tier_floor(tier: str) -> float:
-    return {"basic": 7.0, "standard": 10.0, "premium": 30.0}.get(tier, 10.0)
+def _type_floor(item_type: str) -> float:
+    return {
+        "citation_boost": 35.0,
+        "citation_linkuma": 10.0,
+        "premium": 30.0,
+        "standard": 10.0,
+        "basic": 7.0,
+    }.get(item_type, 10.0)
 
 
 def _estimate_total(items: list[dict]) -> float:
-    return sum(_tier_floor(it["tier"]) for it in items)
+    return sum(_type_floor(it.get("type", "")) for it in items)
 
 
 def _extract_total(payload: Any) -> float:
     if not isinstance(payload, dict):
         return 0.0
-    if isinstance(payload.get("data"), dict):
-        payload = payload["data"]
-    for key in ("total_eur", "total", "amount_eur", "amount"):
-        v = payload.get(key)
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    for key in ("total_eur", "total_price", "total", "amount_eur", "amount", "price"):
+        v = data.get(key)
         if isinstance(v, (int, float)):
             return float(v)
     return 0.0
+
+
+def _extract_order_id(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    orders = data.get("orders")
+    if isinstance(orders, list) and orders and isinstance(orders[0], dict):
+        oid = orders[0].get("id") or orders[0].get("order_id")
+        if oid:
+            return str(oid)
+    return str(data.get("order_id") or data.get("id") or "")
 
 
 def _extract_credit(payload: Any) -> float:

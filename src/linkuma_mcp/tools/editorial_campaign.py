@@ -3,6 +3,11 @@
 Editorial-link counterpart of `local_campaign`. Produces a plan of N editorial
 backlinks (tiers basic/standard/premium) with built-in anchor strategies and
 per-item idempotency on `{plan_id}-{idx:02d}`.
+
+v0.3.0 — items follow the real Linkuma cart schema:
+    type ∈ {basic, standard, premium}, url, project_id, thematic_id, qty,
+    anchor (custom by default), anchor_value, distribution, started_at,
+    fast_publication, brief, pagekw.
 """
 
 from __future__ import annotations
@@ -16,7 +21,6 @@ from .. import idempotency
 from ..accounts import get_client as get_account_client
 from ..anchors import generate_anchors
 from ..checks import (
-    detect_anchor_over_optimisation,
     is_valid_http_url,
     pagekw_anchor_coherence,
 )
@@ -34,6 +38,11 @@ from ..pricing import (
     issue_confirm_token,
 )
 from ..thematics import fetch_thematics
+from .cart import (
+    _detect_overopt,
+    build_order_body,
+    build_price_body,
+)
 
 logger = logging.getLogger("linkuma_mcp")
 
@@ -42,7 +51,7 @@ _VALID_STRATEGIES = {"branded", "exact", "semantic", "mixed"}
 
 # Indicative per-link price floors when /carts/price is unavailable for the
 # local estimate. Authoritative total always comes from the API.
-_TIER_PRICE_FLOOR = {"basic": 7.0, "standard": 10.0, "premium": 30.0}
+_TYPE_PRICE_FLOOR = {"basic": 7.0, "standard": 10.0, "premium": 30.0}
 
 
 def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
@@ -115,20 +124,30 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
 
         # ---- build items
         plan_id = idempotency.generate_external_ref(project_slug="edt")
-        start = datetime.now(UTC).date()
+        # Linkuma requires `started_at` to be at least J+4 working days. Use
+        # J+5 calendar days as a safe buffer (covers a single weekend).
+        start = _add_working_days(datetime.now(UTC).date(), 5)
         step = max(1, spread_days // max(count, 1))
 
         items: list[dict] = []
-        for idx, (item_tier, anchor) in enumerate(zip(tiers_sequence, anchors, strict=False)):
-            publish_date = (start + timedelta(days=idx * step)).isoformat()
+        for idx, (item_type, anchor_value) in enumerate(
+            zip(tiers_sequence, anchors, strict=False)
+        ):
+            started_at = (start + timedelta(days=idx * step)).isoformat()
             items.append(
                 {
-                    "tier": item_tier,
+                    "type": item_type,
+                    "url": target_url,
+                    "project_id": project_id,
                     "thematic_id": thematic_proposed["id"],
-                    "target_url": target_url,
-                    "anchor": anchor,
+                    "qty": 1,
+                    "anchor": "custom",
+                    "anchor_value": anchor_value,
+                    "distribution": "direct",
+                    "started_at": started_at,
+                    "fast_publication": False,
                     "pagekw": pagekw_per_target,
-                    "publish_date": publish_date,
+                    # local-only
                     "external_ref": f"{plan_id}-{idx:02d}",
                 }
             )
@@ -136,22 +155,18 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
         # ---- warnings
         warnings: list[str] = list(thematic_warnings)
         warnings.extend(anchors_payload.get("warnings", []))
-        warnings.extend(detect_anchor_over_optimisation(items))
+        warnings.extend(_detect_overopt(items))
         if pagekw_per_target:
             for idx, it in enumerate(items):
-                if not pagekw_anchor_coherence(pagekw_per_target, it["anchor"]):
+                if not pagekw_anchor_coherence(pagekw_per_target, it.get("anchor_value") or ""):
                     warnings.append(
                         f"items[{idx}]: pagekw `{pagekw_per_target}` shares no tokens "
-                        f"with anchor `{it['anchor']}` — risk of editorial refusal"
+                        f"with anchor `{it.get('anchor_value')}` — risk of editorial refusal"
                     )
 
         # ---- price
-        price_body = {
-            "project_id": project_id,
-            "items": [_strip_local_fields(i) for i in items],
-        }
         try:
-            price_resp = await client.cart_price(price_body)
+            price_resp = await client.cart_price(build_price_body(items))
             total_eur = _extract_total(price_resp)
         except Exception as exc:
             logger.warning("cart_price failed during editorial plan: %s", exc)
@@ -189,7 +204,7 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
             "total_eur": total_eur,
             "warnings": warnings,
             "confirm_token": confirm_token,
-            "budget_cap_eur_global": budget_cap_eur if False else _global_budget_cap(),
+            "budget_cap_eur_global": _global_budget_cap(),
         }
 
     @mcp.tool()
@@ -211,7 +226,6 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
         """
         payload = consume_confirm_token(confirm_token)
         plan_id: str = payload["plan_id"]
-        project_id: str = payload["project_id"]
         items: list[dict] = payload["items"]
         total_eur: float = float(payload["total_eur"])
         plan_account: str | None = payload.get("account") if isinstance(payload, dict) else None
@@ -254,7 +268,7 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
                 settings = await client.get_settings()
                 current_credit = _extract_credit(settings)
                 credit_after = current_credit
-                est_item_price = _TIER_PRICE_FLOOR.get(item["tier"], 10.0)
+                est_item_price = _TYPE_PRICE_FLOOR.get(item.get("type", ""), 10.0)
                 if current_credit < est_item_price:
                     orders_failed.append(
                         {
@@ -267,12 +281,11 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
             except Exception:  # pragma: no cover - defensive
                 pass
 
-            body = {
-                "project_id": project_id,
-                "items": [_strip_local_fields(item)],
-                "external_ref": ext_ref,
-                "payment_method": "direct_credits",
-            }
+            body = build_order_body(
+                [item],
+                external_ref=ext_ref,
+                nice_name=item.get("nice_name") or f"edt-{ext_ref}",
+            )
             try:
                 resp = await client.cart_order(body)
             except LinkumaOrderUncertain as exc:
@@ -305,7 +318,7 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
                 )
                 continue
 
-            order_id = resp.get("order_id") or resp.get("id") or ""
+            order_id = _extract_order_id(resp)
             idempotency.remember(
                 ext_ref,
                 {
@@ -319,9 +332,9 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
                 {
                     "external_ref": ext_ref,
                     "order_id": order_id,
-                    "tier": item["tier"],
-                    "anchor": item["anchor"],
-                    "publish_date": item["publish_date"],
+                    "type": item["type"],
+                    "anchor_value": item.get("anchor_value"),
+                    "started_at": item.get("started_at"),
                 }
             )
             credit_after = _extract_credit(resp) or credit_after
@@ -374,6 +387,19 @@ def _validate_plan_inputs(
         )
 
 
+def _add_working_days(start_date, working_days: int):
+    """Add `working_days` business days (Mon-Fri) to `start_date`."""
+    from datetime import timedelta as _td
+
+    d = start_date
+    added = 0
+    while added < working_days:
+        d = d + _td(days=1)
+        if d.weekday() < 5:
+            added += 1
+    return d
+
+
 def _resolve_tier_sequence(
     count: int, budget_cap_eur_value: float, tier: str
 ) -> list[str]:
@@ -385,15 +411,15 @@ def _resolve_tier_sequence(
     premium = round(count * 0.7)
     standard = count - premium
     est_total = (
-        premium * _TIER_PRICE_FLOOR["premium"]
-        + standard * _TIER_PRICE_FLOOR["standard"]
+        premium * _TYPE_PRICE_FLOOR["premium"]
+        + standard * _TYPE_PRICE_FLOOR["standard"]
     )
     while est_total > budget_cap_eur_value and premium > 0:
         premium -= 1
         standard = count - premium
         est_total = (
-            premium * _TIER_PRICE_FLOOR["premium"]
-            + standard * _TIER_PRICE_FLOOR["standard"]
+            premium * _TYPE_PRICE_FLOOR["premium"]
+            + standard * _TYPE_PRICE_FLOOR["standard"]
         )
     return (["premium"] * premium) + (["standard"] * standard)
 
@@ -449,27 +475,27 @@ async def _propose_thematic(
     return chosen, alternatives, warnings
 
 
-_LOCAL_ONLY_FIELDS = {"external_ref", "pagekw"}
-
-
-def _strip_local_fields(item: dict) -> dict:
-    return {
-        k: v
-        for k, v in item.items()
-        if k not in _LOCAL_ONLY_FIELDS and v is not None
-    }
-
-
 def _extract_total(payload: Any) -> float:
     if not isinstance(payload, dict):
         return 0.0
-    if isinstance(payload.get("data"), dict):
-        payload = payload["data"]
-    for key in ("total_eur", "total", "amount_eur", "amount"):
-        v = payload.get(key)
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    for key in ("total_eur", "total_price", "total", "amount_eur", "amount", "price"):
+        v = data.get(key)
         if isinstance(v, (int, float)):
             return float(v)
     return 0.0
+
+
+def _extract_order_id(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    orders = data.get("orders")
+    if isinstance(orders, list) and orders and isinstance(orders[0], dict):
+        oid = orders[0].get("id") or orders[0].get("order_id")
+        if oid:
+            return str(oid)
+    return str(data.get("order_id") or data.get("id") or "")
 
 
 def _extract_credit(payload: Any) -> float:
@@ -493,7 +519,7 @@ def _extract_credit(payload: Any) -> float:
 
 
 def _estimate_total(items: list[dict]) -> float:
-    return sum(_TIER_PRICE_FLOOR.get(it["tier"], 10.0) for it in items)
+    return sum(_TYPE_PRICE_FLOOR.get(it.get("type", ""), 10.0) for it in items)
 
 
 def _global_budget_cap() -> float:

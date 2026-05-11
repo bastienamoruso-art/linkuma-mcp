@@ -142,4 +142,4 @@ async def test_plan_passes_through_tier_override(registered, base_url):
             refused_order_ids=["ord-x"],
             adjustments={"tier": "premium"},
         )
-    assert plan_res["items"][0]["tier"] == "premium"
+    assert plan_res["items"][0]["type"] == "premium"

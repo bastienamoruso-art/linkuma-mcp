@@ -1,118 +1,120 @@
-# Known issues (v0.2.1)
+# Known issues
 
-Bugs observés contre l'API Linkuma de production qui ne sont **pas encore fixés**
-dans cette release (ils demandent un refactor non-trivial des body builders et
-des tests). Tracker pour la prochaine release.
+Tracker for upstream constraints and remaining gotchas. v0.3.0 fixed the
+major blockers from v0.2.1 (cart body schema). Anything left here is either
+upstream behavior we can't fix from the MCP side, or notes for future
+releases.
 
 ---
 
-## `/carts/price` and `/carts/order` — body schema mismatch
+## ✅ Fixed in v0.3.0
 
-**Endpoints concernés** : `POST /carts/price`, `POST /carts/order`.
+### `/carts/price` and `/carts/order` — body schema mismatch
 
-**Symptôme** : 422 Unprocessable Entity sur tout appel via les tools
-`linkuma_cart_price` et `linkuma_cart_order` (et indirectement `*_campaign_plan`
-qui retombent gracieusement sur une estimation locale via `_TIER_PRICE_FLOOR`).
+**Status**: ✅ Fixed. The MCP body now matches the real Linkuma schema,
+reverse-engineered from 10 successful production orders (Maisons Elytis,
+2026-05-11). Live `linkuma_cart_price` confirmed returning `total_price: 35`
+for a `citation_boost` item.
 
-**Cause** : le MCP envoie un body de la forme
-```json
-{"project_id": "...", "items": [{"tier": "premium", "thematic_id": "...", "target_url": "...", "anchor": "..."}]}
+The cart item schema (v0.3.0):
+
+```jsonc
+{
+  "type": "citation_boost",       // basic | standard | premium | citation_linkuma | citation_boost
+  "url": "https://example.fr/",
+  "map": "https://www.google.com/maps/place/...",  // required for citation_*
+  "project_id": "uuid",
+  "thematic_id": "uuid",
+  "category_id": "uuid",            // optional; required by some citation flows
+  "qty": 1,
+  "anchor": "custom",               // url | generic | custom
+  "anchor_value": "ancre1, ancre2", // required when anchor=="custom"
+  "distribution": "direct",         // direct | schedule
+  "started_at": "2026-05-25",       // must be >= J+4 working days
+  "fast_publication": false,
+  "brief": "text",                  // editorial/citation brief
+  "pagekw": "main keyword"          // required when type is editorial (basic/standard/premium)
+}
 ```
-mais l'API exige en réalité, pour chaque item :
-- `type` (catalogue: `citation_boost`, `citation_linkuma`, `basic`, `standard`, `premium`)
-- `qty` (int)
-- `url` (string, requis si `is_no_link != true`)
-- `project_id` (au niveau de l'item, pas seulement du cart)
-- `thematic_id` (doit pointer sur un id valide du tier — le pool de thematics
-  varie par tier)
-- `anchor` (doit faire partie d'un catalogue serveur de valeurs autorisées,
-  pas une string arbitraire — `"The selected items.0.anchor is invalid"`)
-- `distribution` (probablement `direct` / `dillution` ; spec à clarifier)
-- `started_at` (date ISO)
-- `fast_publication` (bool)
-- `pagekw` (requis SAUF si `type in {citation_linkuma, citation_boost}`)
 
-**Conséquence pour les utilisateurs** :
-- `linkuma_cart_price` retourne `LinkumaValidationError` 422.
-- `linkuma_cart_order` retournera 422 avant tout débit (donc pas de risque de
-  perte de crédit, mais l'order ne se fera pas non plus).
-- `linkuma_local_campaign_plan` et `linkuma_editorial_campaign_plan` continuent
-  de fonctionner en mode "estimation locale" (warning `could not call
-  /carts/price; used local estimate`) puisqu'ils ont un fallback.
+Top-level cart body:
+- `/carts/price` → `{ "items": [...] }`
+- `/carts/order` → `{ "items": [...], "payment_method": "direct_credits",
+                       "external_ref": "...", "nice_name": "..." }`
 
-**Fix prévu (v0.3.0)** :
-1. Refactor `LinkumaClient.cart_price` / `cart_order` pour envoyer le body avec
-   les champs exigés : remap `tier -> type`, ajouter `qty=1`, `url=target_url`,
-   `distribution`, `started_at`, `fast_publication=False`.
-2. Récupérer le catalogue d'`anchor` autorisées depuis le serveur (endpoint à
-   identifier — probablement via `/spots` ou `/catalog`).
-3. Adapter le test suite en conséquence.
-4. Garder `_TIER_PRICE_FLOOR` comme estimation locale tant que cart_price n'est
-   pas fiable.
+---
+
+## Upstream constraints (not MCP bugs)
+
+### `started_at` must be J+4 working days minimum
+
+Linkuma rejects `started_at` if it is earlier than four working days from
+today. The plan tools (`linkuma_local_campaign_plan`,
+`linkuma_editorial_campaign_plan`) default the first publication date to
+J+5 working days as a safe buffer. If you build items manually via
+`linkuma_cart_price`, you must respect this constraint or you'll get
+`"La date de publication doit être à J+4 ouvré minimum"`.
+
+### Thematic catalogue varies by item `type`
+
+`GET /thematics/{tier}` returns the thematics available for that tier, but
+the pool of *publishers* attached to each thematic for a given combination
+of `(thematic_id, project_id, type)` may be empty. In that case Linkuma
+returns:
+
+```
+"Thématique non disponible pour ce type de commande"
+"Le nombre de sites disponibles pour vos thématique / projet / type de commande est 0"
+```
+
+There is no MCP-side fix — you have to pick a thematic with available
+inventory. `linkuma_local_campaign_plan` exposes `thematic_alternatives` so
+the agent can retry with another thematic when the first one is empty.
+
+### `pagekw` required for editorial items
+
+For `type in {basic, standard, premium}`, `pagekw` is required upstream.
+The MCP does not block locally when it is missing (Linkuma will reject the
+request with a clear 422), but `linkuma_editorial_campaign_plan` exposes a
+`pagekw_per_target` parameter — pass it.
+
+### `/carts` upstream filters not honoured
+
+`?status=`, `?project_id=`, `?since=` on `GET /carts` are ignored
+server-side. The MCP applies filters client-side after the fetch — see
+`LinkumaClient.list_orders`. No action required.
 
 ---
 
 ## `/thematics` — path vs query
 
-**Endpoint** : `GET /thematics`.
-
-**Symptôme initial** : 404 sur `GET /thematics?tier=premium`.
-
-**Cause** : Linkuma expose `GET /thematics/{tier}` (tier dans le path), pas
-`/thematics?tier=...`. Le MCP utilisait déjà la bonne URL côté code
-(`thematics.py:66 -> /thematics/{tier}`), donc **pas de bug**, juste à noter
-que le query parameter `tier` n'existe pas.
-
-**Status** : pas un bug, juste documentation.
-
----
-
-## `/carts` — upstream filters not honoured
-
-**Endpoint** : `GET /carts`.
-
-**Symptôme** : passer `?status=refused` ou `?since=2026-02-10` à `/carts` ne
-filtre pas la réponse côté serveur — l'API renvoie systématiquement le même
-contenu (full liste).
-
-**Cause** : Linkuma ne supporte probablement pas ces query parameters (testé en
-prod, mêmes payloads retournés avec ou sans filtre).
-
-**Fix appliqué (v0.2.1)** : `LinkumaClient.list_orders` applique les filtres
-côté client après fetch des carts (statuts, project_id, since, external_ref,
-limit).
-
-**Status** : ✅ Fixé.
+`GET /thematics/{tier}` (tier in the path, e.g. `/thematics/premium`).
+There is no `?tier=` query parameter — the MCP already uses the right URL.
 
 ---
 
 ## Order schema differences API vs MCP spec
 
-L'API renvoie des champs en short-form non documentés dans la "spec" qui a
-servi à écrire le MCP. La couche de normalisation dans `LinkumaClient.list_orders`
-fait les mappings suivants :
+The API returns some short-form fields not documented in the MCP spec.
+`LinkumaClient.list_orders` and `get_order` apply the following
+normalisation:
 
 | API field        | Normalised MCP field |
 |------------------|----------------------|
-| `id`             | `order_id` (et `id` conservé) |
-| `url`            | `target_url`         |
-| `type`           | `tier` (`Citation Boost` → `citation_boost`, etc.) |
+| `id`             | `order_id` (kept as `id` too) |
+| `url`            | `target_url` (back-compat) |
+| `type`           | `tier` (legacy alias) |
 | `price`          | `price_eur`          |
-| `status`         | `status` (valeurs courtes : `pending`, `published`, `refused`, ...) |
 | cart-level `id`  | `cart_id`            |
-| cart `nice_name` | `external_ref` (si pas déjà défini) |
+| cart `nice_name` | `external_ref` (fallback) |
 
-**Status** : ✅ Fixé dans v0.2.1.
+These are response normalisations only; request bodies use the v0.3.0
+schema documented above.
 
 ---
 
 ## Order `project_id` enrichment
 
-Les orders renvoyés inline dans `/carts` ne portent pas de champ `project_id`.
-On le récupère via un fetch de `/projects` (qui expose `orders[]` par projet),
-puis on remplit `order.project_id` côté client.
-
-**Tools enrichis** : `linkuma_dashboard`, `linkuma_export_orders`,
-`linkuma_orders_refused_analyze`.
-
-**Status** : ✅ Fixé dans v0.2.1.
+Orders embedded in `/carts` don't carry `project_id`. The dashboard/export
+tools back-fill it via `/projects` (which exposes `orders[]` per project).
+No user-facing impact.
