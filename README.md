@@ -4,6 +4,15 @@
 > Built-in dry-run, anchor strategies, budget cap, multi-account support, and campaign builders for both local citations and editorial backlinks.
 > [Model Context Protocol](https://modelcontextprotocol.io/) server — works with Claude Desktop, Claude Code, and any MCP-aware client.
 
+**v0.2.1** — bug-fix release. API-mismatch audit + fixes against the live Linkuma API:
+- `/settings` is a list-of-one (`[{"user_id":..,"credit":..}]`), not a dict → fixed in `linkuma_doctor`, `linkuma_dashboard`, `linkuma_cart_price`, and the campaign builders.
+- No flat `GET /orders` endpoint exists upstream → `LinkumaClient.list_orders` now walks `/carts` and flattens orders, propagating `cart_id`/`external_ref` onto each order.
+- Order field schema (`id` not `order_id`, `url` not `target_url`, `type` not `tier`, `price` not `price_eur`) is now normalised at the client layer.
+- `/carts` upstream filters (`status`, `since`, `project_id`) are unreliable → filters are now applied client-side after fetch.
+- Orders are missing `project_id` in `/carts`; back-fill via `/projects` (which exposes `orders[]` per project).
+- `linkuma_orders_list` now accepts the short-form statuses Linkuma actually returns (`pending`, `published`, `refused`, ...) in addition to the legacy spec labels.
+- Known remaining mismatch: `POST /carts/price` and `POST /carts/order` body schema (different field names + extra required fields) — documented in `KNOWN_ISSUES.md`, slated for v0.3.0. Campaign planners fall back to local price estimation.
+
 **v0.2.0** — multi-account, editorial campaigns, dashboard, refusal analyser, CSV export, suggest-tier intelligence. Full-Linkuma (zero external dependency on third-party SEO APIs).
 
 ---

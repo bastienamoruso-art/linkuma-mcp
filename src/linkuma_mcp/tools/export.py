@@ -73,16 +73,29 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
 
         orders = await client.list_orders(params=params)
 
-        # Build a project_id -> name map to populate `project_name` rows.
+        # Build a project_id -> name map AND an order_id -> project_id map so
+        # orders that don't carry project_id (Linkuma's /carts shape) get
+        # enriched.
         project_names: dict[str, str] = {}
+        order_to_project: dict[str, str] = {}
         try:
             projects = await client.list_projects()
             for p in projects:
                 pid = p.get("id")
                 if pid:
                     project_names[str(pid)] = p.get("name") or ""
+                    for o in p.get("orders") or []:
+                        oid = o.get("id") or o.get("order_id")
+                        if oid:
+                            order_to_project[str(oid)] = str(pid)
         except Exception:  # pragma: no cover - non-blocking
             pass
+
+        for o in orders:
+            if not o.get("project_id"):
+                oid = o.get("order_id") or o.get("id")
+                if oid and str(oid) in order_to_project:
+                    o["project_id"] = order_to_project[str(oid)]
 
         rows = [_flatten_order(o, project_names) for o in orders]
 

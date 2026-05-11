@@ -31,17 +31,20 @@ def tool(base_url):
 
 @pytest.mark.asyncio
 async def test_detects_anchor_pattern(tool, base_url):
-    payload = {
+    # Linkuma carts shape — refused orders embedded inline.
+    carts_payload = {
         "data": [
-            {"order_id": f"o{i}", "tier": "premium",
-             "target_url": "https://example.fr/page",
-             "anchor": "exact",
-             "refusal_reason": "anchor over-optimisation"}
+            {"id": f"c{i}", "status": "refused", "orders": [
+                {"id": f"o{i}", "tier": "premium", "status": "refused",
+                 "target_url": "https://example.fr/page",
+                 "anchor": "exact",
+                 "refusal_reason": "anchor over-optimisation"}
+            ]}
             for i in range(5)
         ]
     }
     with respx.mock(base_url=base_url, assert_all_called=False) as rsx:
-        rsx.get("/orders").mock(return_value=httpx.Response(200, json=payload))
+        rsx.get("/carts").mock(return_value=httpx.Response(200, json=carts_payload))
         res = await tool()
     assert res["total_refused"] == 5
     assert any("anchor" in p for p in res["common_patterns"])
@@ -50,16 +53,18 @@ async def test_detects_anchor_pattern(tool, base_url):
 
 @pytest.mark.asyncio
 async def test_detects_url_hot_spot(tool, base_url):
-    payload = {
+    carts_payload = {
         "data": [
-            {"order_id": f"o{i}", "tier": "standard",
-             "target_url": "https://example.fr/badpage",
-             "anchor": "x", "refusal_reason": "url not indexable"}
+            {"id": f"c{i}", "status": "refused", "orders": [
+                {"id": f"o{i}", "tier": "standard", "status": "refused",
+                 "target_url": "https://example.fr/badpage",
+                 "anchor": "x", "refusal_reason": "url not indexable"}
+            ]}
             for i in range(4)
         ]
     }
     with respx.mock(base_url=base_url, assert_all_called=False) as rsx:
-        rsx.get("/orders").mock(return_value=httpx.Response(200, json=payload))
+        rsx.get("/carts").mock(return_value=httpx.Response(200, json=carts_payload))
         res = await tool()
     assert any("Abandon" in r for r in res["recommendations"])
     assert any("Validate target URLs" in r for r in res["recommendations"])
@@ -68,7 +73,7 @@ async def test_detects_url_hot_spot(tool, base_url):
 @pytest.mark.asyncio
 async def test_no_refusals(tool, base_url):
     with respx.mock(base_url=base_url, assert_all_called=False) as rsx:
-        rsx.get("/orders").mock(return_value=httpx.Response(200, json={"data": []}))
+        rsx.get("/carts").mock(return_value=httpx.Response(200, json={"data": []}))
         res = await tool()
     assert res["total_refused"] == 0
     assert "No refused orders" in res["common_patterns"][0]
@@ -76,11 +81,27 @@ async def test_no_refusals(tool, base_url):
 
 @pytest.mark.asyncio
 async def test_passes_project_filter(tool, base_url):
+    # Filters now apply client-side (Linkuma /carts upstream filters are
+    # unreliable). We assert the tool runs successfully + only matching
+    # records survive — not that query params were forwarded.
+    carts_payload = {
+        "data": [
+            {"id": "cA", "project_id": "p1", "status": "refused", "orders": [
+                {"id": "oA", "project_id": "p1", "tier": "premium",
+                 "status": "refused", "anchor": "x",
+                 "refusal_reason": "anchor"}
+            ]},
+            {"id": "cB", "project_id": "p2", "status": "refused", "orders": [
+                {"id": "oB", "project_id": "p2", "tier": "premium",
+                 "status": "refused", "anchor": "y",
+                 "refusal_reason": "anchor"}
+            ]},
+        ]
+    }
     with respx.mock(base_url=base_url, assert_all_called=False) as rsx:
-        route = rsx.get("/orders").mock(
-            return_value=httpx.Response(200, json={"data": []})
+        rsx.get("/carts").mock(
+            return_value=httpx.Response(200, json=carts_payload)
         )
-        await tool(project_id="p1")
-        req = route.calls.last.request
-        assert "project_id=p1" in str(req.url)
-        assert "status=refused" in str(req.url)
+        res = await tool(project_id="p1")
+    # Only p1's order should be analysed.
+    assert res["total_refused"] == 1

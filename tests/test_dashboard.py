@@ -33,14 +33,22 @@ def tool(base_url):
 
 @pytest.mark.asyncio
 async def test_dashboard_aggregates_by_project_and_tier(tool, base_url):
-    orders_payload = {
+    # Linkuma returns /carts (no flat /orders endpoint). We embed orders inline
+    # and our client.list_orders flattens + normalises (id->order_id, etc.).
+    carts_payload = {
         "data": [
-            {"order_id": "o1", "project_id": "p1", "tier": "premium",
-             "status": "published", "price_eur": 30},
-            {"order_id": "o2", "project_id": "p1", "tier": "premium",
-             "status": "published", "price_eur": 30},
-            {"order_id": "o3", "project_id": "p2", "tier": "standard",
-             "status": "refused", "price_eur": 10},
+            {"id": "c1", "project_id": "p1", "status": "published",
+             "orders": [
+                 {"id": "o1", "project_id": "p1", "tier": "premium",
+                  "status": "published", "price_eur": 30},
+                 {"id": "o2", "project_id": "p1", "tier": "premium",
+                  "status": "published", "price_eur": 30},
+             ]},
+            {"id": "c2", "project_id": "p2", "status": "refused",
+             "orders": [
+                 {"id": "o3", "project_id": "p2", "tier": "standard",
+                  "status": "refused", "price_eur": 10},
+             ]},
         ]
     }
     projects_payload = [
@@ -51,7 +59,7 @@ async def test_dashboard_aggregates_by_project_and_tier(tool, base_url):
         rsx.get("/settings").mock(
             return_value=httpx.Response(200, json={"credit_eur": 500})
         )
-        rsx.get("/orders").mock(return_value=httpx.Response(200, json=orders_payload))
+        rsx.get("/carts").mock(return_value=httpx.Response(200, json=carts_payload))
         rsx.get("/projects").mock(
             return_value=httpx.Response(200, json=projects_payload)
         )
@@ -71,18 +79,20 @@ async def test_dashboard_aggregates_by_project_and_tier(tool, base_url):
 @pytest.mark.asyncio
 async def test_dashboard_refusal_rate_alert(tool, base_url):
     # 5 orders, 2 refused -> 40% rate -> alert
-    orders_payload = {
+    carts_payload = {
         "data": [
-            {"order_id": f"o{i}", "project_id": "p1", "tier": "premium",
-             "status": "refused" if i < 2 else "published", "price_eur": 30}
-            for i in range(5)
+            {"id": "c1", "project_id": "p1", "status": "refused", "orders": [
+                {"id": f"o{i}", "project_id": "p1", "tier": "premium",
+                 "status": "refused" if i < 2 else "published", "price_eur": 30}
+                for i in range(5)
+            ]}
         ]
     }
     with respx.mock(base_url=base_url, assert_all_called=False) as rsx:
         rsx.get("/settings").mock(
             return_value=httpx.Response(200, json={"credit_eur": 1000})
         )
-        rsx.get("/orders").mock(return_value=httpx.Response(200, json=orders_payload))
+        rsx.get("/carts").mock(return_value=httpx.Response(200, json=carts_payload))
         rsx.get("/projects").mock(
             return_value=httpx.Response(200, json=[{"id": "p1", "name": "Site A"}])
         )
@@ -94,17 +104,20 @@ async def test_dashboard_refusal_rate_alert(tool, base_url):
 @pytest.mark.asyncio
 async def test_dashboard_stale_pending_alert(tool, base_url):
     old = (datetime.now(UTC) - timedelta(days=30)).isoformat()
-    orders_payload = {
+    carts_payload = {
         "data": [
-            {"order_id": "o1", "project_id": "p1", "tier": "premium",
-             "status": "pending_validation", "created_at": old, "price_eur": 30}
+            {"id": "c1", "project_id": "p1", "status": "pending_validation",
+             "created_at": old, "orders": [
+                {"id": "o1", "project_id": "p1", "tier": "premium",
+                 "status": "pending_validation", "created_at": old, "price_eur": 30}
+            ]}
         ]
     }
     with respx.mock(base_url=base_url, assert_all_called=False) as rsx:
         rsx.get("/settings").mock(
             return_value=httpx.Response(200, json={"credit_eur": 1000})
         )
-        rsx.get("/orders").mock(return_value=httpx.Response(200, json=orders_payload))
+        rsx.get("/carts").mock(return_value=httpx.Response(200, json=carts_payload))
         rsx.get("/projects").mock(return_value=httpx.Response(200, json=[]))
         res = await tool()
     assert any(a["type"] == "stale_pending" for a in res["alerts"])
@@ -121,7 +134,7 @@ async def test_dashboard_scope_project_requires_id(tool):
 async def test_dashboard_since_shorthand_resolves(tool, base_url):
     with respx.mock(base_url=base_url, assert_all_called=False) as rsx:
         rsx.get("/settings").mock(return_value=httpx.Response(200, json={"credit_eur": 0}))
-        rsx.get("/orders").mock(return_value=httpx.Response(200, json={"data": []}))
+        rsx.get("/carts").mock(return_value=httpx.Response(200, json={"data": []}))
         rsx.get("/projects").mock(return_value=httpx.Response(200, json=[]))
         res = await tool(since="90d_ago")
     # YYYY-MM-DD shape

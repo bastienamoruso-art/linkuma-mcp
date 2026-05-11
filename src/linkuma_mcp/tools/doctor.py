@@ -73,6 +73,9 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
 
 
 def _extract_credit(settings: Any) -> float:
+    # Linkuma /settings returns a list-of-one in practice: [{"user_id": ..., "credit": 150}]
+    if isinstance(settings, list):
+        settings = settings[0] if settings else {}
     if not isinstance(settings, dict):
         return 0.0
     if isinstance(settings.get("data"), dict):
@@ -90,8 +93,23 @@ def _extract_credit(settings: Any) -> float:
 
 
 async def _safe_count_recent_orders(client: LinkumaClient) -> int:
+    """Count orders created in the last 30 days, defensively."""
+    from datetime import datetime, timedelta, timezone
+
     try:
         orders = await client.list_orders(params={"limit": 100})
     except Exception:
         return 0
-    return len(orders)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    count = 0
+    for o in orders:
+        created = o.get("created_at") or o.get("started_at")
+        if not created:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+            if dt >= cutoff:
+                count += 1
+        except Exception:
+            continue
+    return count

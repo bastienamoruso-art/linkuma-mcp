@@ -43,10 +43,31 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
             "status": "refused",
             "since": since_iso,
         }
+        # Enrich orders with project_id via /projects (Linkuma /carts orders
+        # don't carry project_id directly). We pre-load the lookup before
+        # filtering so the project_id filter actually applies.
+        order_to_project: dict[str, str] = {}
         if project_id:
-            params["project_id"] = project_id
+            try:
+                projects = await client.list_projects()
+                for p in projects:
+                    pid = p.get("id")
+                    for o in p.get("orders") or []:
+                        oid = o.get("id") or o.get("order_id")
+                        if oid and pid:
+                            order_to_project[str(oid)] = str(pid)
+            except Exception:  # pragma: no cover - defensive
+                pass
 
-        orders = await client.list_orders(params=params)
+        orders = await client.list_orders(params={"limit": 500, "status": "refused", "since": since_iso})
+        if project_id:
+            # Back-fill project_id then filter.
+            for o in orders:
+                if not o.get("project_id"):
+                    oid = o.get("order_id") or o.get("id")
+                    if oid and str(oid) in order_to_project:
+                        o["project_id"] = order_to_project[str(oid)]
+            orders = [o for o in orders if str(o.get("project_id") or "") == str(project_id)]
 
         by_reason: Counter = Counter()
         by_url: Counter = Counter()

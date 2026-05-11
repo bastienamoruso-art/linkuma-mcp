@@ -33,39 +33,54 @@ def tool(base_url):
 @pytest.mark.asyncio
 async def test_export_inline_csv(tool, base_url):
     t, _ = tool
-    orders_payload = {
+    carts_payload = {
         "data": [
             {
-                "order_id": "ord-1",
+                "id": "c1",
                 "external_ref": "ref-1",
                 "project_id": "p1",
-                "status": "published",
-                "tier": "premium",
-                "target_url": "https://example.fr/page",
-                "anchor": "courtier orleans",
-                "pagekw": "courtier immobilier orleans",
-                "thematic_id": "th-x",
-                "published_url": "https://blog.fr/post",
-                "price_eur": 30,
-                "created_at": "2026-05-01",
+                "orders": [
+                    {
+                        "id": "ord-1",
+                        "external_ref": "ref-1",
+                        "project_id": "p1",
+                        "status": "published",
+                        "tier": "premium",
+                        "target_url": "https://example.fr/page",
+                        "anchor": "courtier orleans",
+                        "pagekw": "courtier immobilier orleans",
+                        "thematic_id": "th-x",
+                        "published_url": "https://blog.fr/post",
+                        "price_eur": 30,
+                        "created_at": "2026-05-01",
+                    },
+                ],
             },
             {
-                "order_id": "ord-2",
+                "id": "c2",
                 "external_ref": "ref-2",
                 "project_id": "p1",
-                "status": "refused",
-                "tier": "standard",
-                "target_url": "https://example.fr/page",
-                "anchor": "exact match",
-                "refusal_reason": "anchor over-optimisation",
-                "price_eur": "10",
+                "orders": [
+                    {
+                        "id": "ord-2",
+                        "external_ref": "ref-2",
+                        "project_id": "p1",
+                        "status": "refused",
+                        "tier": "standard",
+                        "target_url": "https://example.fr/page",
+                        "anchor": "exact match",
+                        "refusal_reason": "anchor over-optimisation",
+                        "price_eur": "10",
+                        "created_at": "2026-05-02",
+                    },
+                ],
             },
         ]
     }
     projects_payload = [{"id": "p1", "name": "Acme Site"}]
 
     with respx.mock(base_url=base_url, assert_all_called=False) as rsx:
-        rsx.get("/orders").mock(return_value=httpx.Response(200, json=orders_payload))
+        rsx.get("/carts").mock(return_value=httpx.Response(200, json=carts_payload))
         rsx.get("/projects").mock(return_value=httpx.Response(200, json=projects_payload))
 
         res = await t(project_id="p1", since="2026-01-01")
@@ -85,7 +100,7 @@ async def test_export_to_file(tool, base_url, tmp_path):
     out = tmp_path / "orders.csv"
 
     with respx.mock(base_url=base_url, assert_all_called=False) as rsx:
-        rsx.get("/orders").mock(return_value=httpx.Response(200, json={"data": []}))
+        rsx.get("/carts").mock(return_value=httpx.Response(200, json={"data": []}))
         rsx.get("/projects").mock(return_value=httpx.Response(200, json=[]))
 
         res = await t(output_path=str(out))
@@ -107,18 +122,24 @@ async def test_export_rejects_non_csv_format(tool):
 @pytest.mark.asyncio
 async def test_export_handles_missing_project_name(tool, base_url):
     t, _ = tool
-    orders_payload = {
+    carts_payload = {
         "data": [
             {
-                "order_id": "o1",
+                "id": "c1",
                 "project_id": "ghost",
-                "tier": "basic",
-                "status": "published",
+                "orders": [
+                    {
+                        "id": "o1",
+                        "project_id": "ghost",
+                        "tier": "basic",
+                        "status": "published",
+                    }
+                ],
             }
         ]
     }
     with respx.mock(base_url=base_url, assert_all_called=False) as rsx:
-        rsx.get("/orders").mock(return_value=httpx.Response(200, json=orders_payload))
+        rsx.get("/carts").mock(return_value=httpx.Response(200, json=carts_payload))
         rsx.get("/projects").mock(return_value=httpx.Response(200, json=[]))
 
         res = await t()

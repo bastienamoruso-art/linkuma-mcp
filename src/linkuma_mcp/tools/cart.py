@@ -274,6 +274,9 @@ def _extract_priced_items(payload: Any) -> list[dict]:
 
 
 def _extract_credit(payload: Any) -> float:
+    # Linkuma /settings returns a list-of-one in practice: [{"user_id":..,"credit":..}]
+    if isinstance(payload, list):
+        payload = payload[0] if payload else {}
     if not isinstance(payload, dict):
         return 0.0
     if isinstance(payload.get("data"), dict):
@@ -282,4 +285,9 @@ def _extract_credit(payload: Any) -> float:
         v = payload.get(key)
         if isinstance(v, (int, float)):
             return float(v)
+        if isinstance(v, str):
+            try:
+                return float(v)
+            except ValueError:
+                continue
     return 0.0

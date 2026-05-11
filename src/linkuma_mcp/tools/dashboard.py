@@ -62,16 +62,30 @@ def register(mcp: Any, get_client: Callable[[], LinkumaClient]) -> None:
             params["project_id"] = project_id
         orders = await client.list_orders(params=params)
 
-        # Project name map
+        # Project name map + order->project_id back-fill.
+        # Linkuma carts don't carry `project_id` on the inner orders, so we
+        # build a {order_id: project_id} map from /projects (which exposes
+        # `orders[]` per project) and fill it in.
         project_names: dict[str, str] = {}
+        order_to_project: dict[str, str] = {}
         try:
             projects = await client.list_projects()
             for p in projects:
                 pid = p.get("id")
                 if pid:
                     project_names[str(pid)] = p.get("name") or ""
+                    for o in p.get("orders") or []:
+                        oid = o.get("id") or o.get("order_id")
+                        if oid:
+                            order_to_project[str(oid)] = str(pid)
         except Exception:  # pragma: no cover - non-blocking
             pass
+
+        for o in orders:
+            if not o.get("project_id"):
+                oid = o.get("order_id") or o.get("id")
+                if oid and str(oid) in order_to_project:
+                    o["project_id"] = order_to_project[str(oid)]
 
         # ---- aggregate
         by_project: dict[str, dict[str, Any]] = {}
@@ -220,6 +234,9 @@ def _coerce_price(order: dict) -> float:
 
 
 def _extract_credit(payload: Any) -> float:
+    # Linkuma /settings returns a list-of-one in practice: [{"user_id":..,"credit":..}]
+    if isinstance(payload, list):
+        payload = payload[0] if payload else {}
     if not isinstance(payload, dict):
         return 0.0
     if isinstance(payload.get("data"), dict):
@@ -228,6 +245,11 @@ def _extract_credit(payload: Any) -> float:
         v = payload.get(key)
         if isinstance(v, (int, float)):
             return float(v)
+        if isinstance(v, str):
+            try:
+                return float(v)
+            except ValueError:
+                continue
     return 0.0
 
 

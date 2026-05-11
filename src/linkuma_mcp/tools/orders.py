@@ -8,12 +8,24 @@ from typing import Any
 from ..client import LinkumaClient
 from ..errors import LinkumaValidationError
 
+# Status values accepted on input.
+#
+# Linkuma's API actually returns short-form statuses on each order
+# (`pending`, `published`, `refused`, ...). The legacy "spec" labels
+# (`pending_validation`, `in_writing`, `awaiting_publication`) are kept here
+# for backwards compatibility but will be matched against the normalised
+# short form in the client filter.
 _VALID_STATUS = {
+    # short-form (current Linkuma API)
+    "pending",
+    "in_progress",
+    "published",
+    "refused",
+    "cancelled",
+    # legacy / spec labels (still accepted)
     "pending_validation",
     "in_writing",
     "awaiting_publication",
-    "published",
-    "refused",
 }
 
 
