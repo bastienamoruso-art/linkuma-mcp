@@ -66,9 +66,9 @@ def test_corrupt_file_is_recovered() -> None:
 
 
 def test_generate_external_ref_pattern() -> None:
-    ref = idempotency.generate_external_ref("acme-corp")
+    ref = idempotency.generate_external_ref("acmecorp")
     parts = ref.split("-")
-    assert parts[0] == "acme-corp"
+    assert parts[0] == "acmecorp"
     assert len(parts[1]) == 8 and parts[1].isdigit()
     assert len(parts[2]) == 8
 
