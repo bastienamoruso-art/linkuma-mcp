@@ -1,0 +1,69 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "linkuma-mcp"
+version = "0.1.0"
+description = "MCP server for Linkuma API — safe, idempotent netlinking automation with built-in dry-run, anchor validation, and local citation campaigns."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Bastien Amoruso", email = "bastien@kamak.ai" },
+]
+keywords = ["mcp", "linkuma", "seo", "netlinking", "backlinks", "automation"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Internet :: WWW/HTTP",
+]
+dependencies = [
+  "fastmcp>=0.4",
+  "httpx>=0.27",
+  "pydantic>=2.6",
+  "python-dotenv>=1.0",
+  "nanoid>=2.0",
+  "tldextract>=5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "respx>=0.21",
+  "ruff>=0.4",
+  "mypy>=1.10",
+]
+
+[project.scripts]
+linkuma-mcp = "linkuma_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/bastienamoruso-art/linkuma-mcp"
+Repository = "https://github.com/bastienamoruso-art/linkuma-mcp"
+Issues = "https://github.com/bastienamoruso-art/linkuma-mcp/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/linkuma_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "B", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict_optional = true
+ignore_missing_imports = true
