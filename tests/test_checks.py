@@ -76,7 +76,7 @@ def test_gmaps_url_empty_rejected() -> None:
 @pytest.mark.parametrize(
     "domain, ok",
     [
-        ("plaques24.fr", True),
+        ("example.fr", True),
         ("sub.example.co.uk", True),
         ("localhost", False),
         ("", False),

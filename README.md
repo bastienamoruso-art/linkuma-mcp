@@ -115,7 +115,7 @@ If the call times out, you get `LinkumaOrderUncertain` — do **not** retry. Ins
 ### 3. Local citation campaign
 
 ```text
-> Build a 10-citation campaign for Maisons Elytis Bourgoin pointing to https://maisons-elytis-bourgoin.fr/, GMaps URL https://www.google.com/maps/place/Maisons+Elytis+Bourgoin/@45.59,5.27,17z, budget 250 EUR, thematic hint "travaux".
+> Build a 10-citation campaign for Le Petit Bistrot Marseille pointing to https://lepetitbistrot-marseille.fr/, GMaps URL https://www.google.com/maps/place/Le+Petit+Bistrot/@43.2965,5.3698,17z, budget 250 EUR, thematic hint "travaux".
 
 # Tool: linkuma_local_campaign_plan
 # -> returns 10 items with publish dates spread over 30 days,
